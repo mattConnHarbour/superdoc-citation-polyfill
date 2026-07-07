@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { SuperDocEditor, type SuperDocRef } from '@superdoc-dev/react';
 import '@superdoc-dev/react/style.css';
-import { CitationPolyfill, type CitationData } from './citation-polyfill';
+import { CitationStyler, type CitationData } from './citation-polyfill';
 
 interface Source {
   sourceId: string;
@@ -18,7 +18,7 @@ interface InlineCitation {
 
 function App() {
   const editorRef = useRef<SuperDocRef>(null);
-  const polyfillRef = useRef<CitationPolyfill | null>(null);
+  const stylerRef = useRef<CitationStyler | null>(null);
 
   const [file, setFile] = useState<File | null>(null);
   const [isReady, setIsReady] = useState(false);
@@ -35,7 +35,7 @@ function App() {
   useEffect(() => {
     loadDefaultDoc();
     return () => {
-      polyfillRef.current?.destroy();
+      stylerRef.current?.destroy();
     };
   }, []);
 
@@ -88,31 +88,60 @@ function App() {
     }
   }, []);
 
+  // Native click handler using SuperDoc APIs
+  const getCitationAtPos = useCallback((pos: number): CitationData | null => {
+    const editor = editorRef.current?.getInstance()?.activeEditor;
+    if (!editor) return null;
+
+    const node = editor.state.doc.nodeAt(pos);
+    if (node?.type.name !== 'citation') return null;
+
+    return {
+      sourceIds: node.attrs.sourceIds || [],
+      resolvedText: node.attrs.resolvedText || '',
+      instruction: node.attrs.instruction || '',
+      position: pos,
+    };
+  }, []);
+
   const handleEditorReady = useCallback(({ superdoc }: { superdoc: any }) => {
     setIsReady(true);
 
     const container = document.getElementById('superdoc-editor') as HTMLElement;
-    if (!superdoc || !container) return;
+    const editor = superdoc?.activeEditor;
+    if (!superdoc || !container || !editor) return;
 
-    // Clean up previous polyfill
-    polyfillRef.current?.destroy();
+    // Clean up previous styler
+    stylerRef.current?.destroy();
 
-    // Set up new polyfill - it handles everything automatically
-    polyfillRef.current = new CitationPolyfill(superdoc, container);
-    polyfillRef.current
-      .onCitationClick(setSelectedCitation)
-      .onSelectionChange((citation, pos) => {
+    // Set up new styler (styling + numbering only)
+    stylerRef.current = new CitationStyler(superdoc, container);
+    setNumberMap(stylerRef.current.getNumberMap());
+
+    // Native click handling
+    const clickHandler = (e: MouseEvent) => {
+      const pos = editor.posAtCoords({ left: e.clientX, top: e.clientY })?.pos;
+      if (pos !== undefined) {
+        const citation = getCitationAtPos(pos);
         setSelectedCitation(citation);
-        setCursorPos(pos);
-      });
+      }
+    };
+    container.addEventListener('click', clickHandler);
 
-    // Update number map from polyfill
-    setNumberMap(polyfillRef.current.getNumberMap());
+    // Native selection change handling
+    const selectionHandler = () => {
+      const pos = editor.state.selection.from;
+      setCursorPos(pos);
+      setSelectedCitation(getCitationAtPos(pos));
+    };
+    editor.on('selectionUpdate', selectionHandler);
 
     // Load sources and citations from document API
     refreshSources();
     refreshCitations();
-  }, [refreshSources, refreshCitations]);
+
+    // Cleanup on unmount handled by useEffect
+  }, [refreshSources, refreshCitations, getCitationAtPos]);
 
   const getSelectedSources = () => {
     if (!selectedCitation?.sourceIds?.length) return [];
@@ -147,17 +176,28 @@ function App() {
     setNewSource({ type: 'journalArticle', title: '', author: '', year: '' });
   };
 
+  // Native citation insertion using SDK
   const insertCitation = () => {
-    if (!polyfillRef.current || !selectedSourceId) return;
+    const superdoc = editorRef.current?.getInstance();
+    const doc = superdoc?.activeEditor?.doc;
+    if (!doc || !selectedSourceId) return;
 
     const source = sources.find(s => s.sourceId === selectedSourceId);
     if (!source) return;
 
-    editorRef.current?.getInstance()?.activeEditor?.focus();
-    if (polyfillRef.current.insertCitation(cursorPos, source.tag)) {
-      setNumberMap(polyfillRef.current.getNumberMap());
-      refreshCitations();
+    superdoc.activeEditor?.focus();
+
+    // Use native SDK to insert citation
+    doc.citations.insert({
+      at: { kind: 'cursor' },
+      sourceIds: [source.tag],
+    });
+
+    // Refresh styler to update numbering
+    if (stylerRef.current) {
+      setNumberMap(stylerRef.current.refresh());
     }
+    refreshCitations();
   };
 
   const exportDocx = () => {
@@ -170,8 +210,8 @@ function App() {
   };
 
   const getCitationNumbers = (sourceIds: string[] | undefined): string => {
-    if (!sourceIds?.length || !polyfillRef.current) return '?';
-    return polyfillRef.current.getLabel(sourceIds);
+    if (!sourceIds?.length || !stylerRef.current) return '?';
+    return stylerRef.current.getLabel(sourceIds);
   };
 
   const formatAuthors = (authors?: Array<{ first?: string; last: string }>) => {

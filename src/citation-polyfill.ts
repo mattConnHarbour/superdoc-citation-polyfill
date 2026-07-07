@@ -1,21 +1,14 @@
 /**
- * Citation Polyfill - plug and play setup for SuperDoc citations.
+ * Citation Polyfill (Minimal) - styling and numbering only.
  *
- * Usage:
- *   const polyfill = new CitationPolyfill(superdoc, container);
- *   polyfill.onCitationClick((citation) => console.log(citation));
- *   polyfill.onSelectionChange((citation, pos) => console.log(citation, pos));
+ * For click handling and positioning, use SuperDoc's native Custom UI APIs:
+ * - Click detection: editor click events + doc.citations.list()
+ * - Positioning: ui.viewport.getRect()
  *
- *   // Later, to clean up:
- *   polyfill.destroy();
+ * This polyfill only provides:
+ * - Pill-style CSS for citation markers
+ * - Numbered label generation (sourceId -> [1], [2], etc.)
  */
-
-export interface CitationData {
-  sourceIds: string[];
-  resolvedText: string;
-  instruction: string;
-  position: number;
-}
 
 const CITATION_CSS = `
 .citation-pill {
@@ -36,30 +29,109 @@ const CITATION_CSS = `
 `;
 
 let cssInjected = false;
-function injectCSS() {
+
+/**
+ * Inject citation pill CSS styles into the document head.
+ * Safe to call multiple times - only injects once.
+ */
+export function injectCitationStyles(): void {
   if (cssInjected) return;
   const style = document.createElement('style');
+  style.id = 'citation-polyfill-styles';
   style.textContent = CITATION_CSS;
   document.head.appendChild(style);
   cssInjected = true;
 }
 
-export class CitationPolyfill {
-  private superdoc: any;
+/**
+ * Apply the citation-pill class to all citation elements in a container.
+ * Call this after document updates to ensure new citations are styled.
+ */
+export function applyCitationStyles(container: HTMLElement): void {
+  injectCitationStyles();
+  container.querySelectorAll('[data-id="citation"]').forEach(el => {
+    if (!el.classList.contains('citation-pill')) {
+      el.classList.add('citation-pill');
+    }
+  });
+}
+
+/**
+ * Build a map of sourceId -> citation number based on document order.
+ * First occurrence of each sourceId gets the next number.
+ */
+export function buildNumberMap(editor: any): Map<string, number> {
+  const numberMap = new Map<string, number>();
+  let num = 1;
+
+  editor.state.doc.descendants((node: any) => {
+    if (node.type.name === 'citation') {
+      for (const sid of node.attrs.sourceIds || []) {
+        if (!numberMap.has(sid)) {
+          numberMap.set(sid, num++);
+        }
+      }
+    }
+  });
+
+  return numberMap;
+}
+
+/**
+ * Get a formatted citation label for given sourceIds.
+ * Example: ['src1', 'src2'] with numberMap {src1: 1, src2: 3} -> "1,3."
+ */
+export function getCitationLabel(sourceIds: string[], numberMap: Map<string, number>): string {
+  const nums = sourceIds
+    .map(sid => numberMap.get(sid))
+    .filter((n): n is number => n !== undefined);
+  return nums.length ? nums.join(',') + '.' : '?.';
+}
+
+/**
+ * Update all citations in the document to use numbered labels.
+ * Mutates the document by setting resolvedText on each citation node.
+ */
+export function applyNumberedLabels(editor: any): Map<string, number> {
+  const numberMap = buildNumberMap(editor);
+  const citations: { pos: number; node: any }[] = [];
+
+  editor.state.doc.descendants((node: any, pos: number) => {
+    if (node.type.name === 'citation') {
+      citations.push({ pos, node });
+    }
+  });
+
+  if (citations.length === 0) return numberMap;
+
+  // Update labels in reverse order to preserve positions
+  let tr = editor.state.tr;
+  for (let i = citations.length - 1; i >= 0; i--) {
+    const { pos, node } = citations[i];
+    const label = getCitationLabel(node.attrs.sourceIds || [], numberMap);
+    tr = tr.setNodeMarkup(pos, undefined, { ...node.attrs, resolvedText: label });
+  }
+  editor.dispatch(tr);
+
+  return numberMap;
+}
+
+/**
+ * Convenience class that combines all polyfill functionality.
+ * Automatically applies styles and updates on document changes.
+ */
+export class CitationStyler {
   private editor: any;
   private container: HTMLElement;
-  private cleanupFns: (() => void)[] = [];
   private numberMap: Map<string, number> = new Map();
-  private clickCallback: ((citation: CitationData | null) => void) | null = null;
-  private selectionCallback: ((citation: CitationData | null, pos: number) => void) | null = null;
+  private unsubscribe: (() => void) | null = null;
 
   constructor(superdoc: any, container: HTMLElement) {
-    this.superdoc = superdoc;
     this.editor = superdoc?.activeEditor;
     this.container = container;
 
     if (!this.editor || !this.container) {
-      console.warn('[CitationPolyfill] Missing editor or container');
+      console.warn('[CitationStyler] Missing editor or container');
       return;
     }
 
@@ -67,160 +139,47 @@ export class CitationPolyfill {
   }
 
   private init() {
-    // Inject CSS
-    injectCSS();
-
-    // Convert citations to numbered format and apply styles
+    injectCitationStyles();
     this.refresh();
-
-    // Set up click handler
-    const clickHandler = (e: MouseEvent) => {
-      if (!this.clickCallback) return;
-      const pos = this.editor.posAtCoords({ left: e.clientX, top: e.clientY })?.pos;
-      this.clickCallback(pos ? this.getCitationAt(pos) : null);
-    };
-    this.container.addEventListener('click', clickHandler);
-    this.cleanupFns.push(() => this.container.removeEventListener('click', clickHandler));
-
-    // Set up selection change handler
-    const selectionHandler = () => {
-      if (!this.selectionCallback) return;
-      const pos = this.editor.state.selection.from;
-      this.selectionCallback(this.getCitationAt(pos), pos);
-    };
-    this.editor.on('selectionUpdate', selectionHandler);
-    this.cleanupFns.push(() => this.editor.off('selectionUpdate', selectionHandler));
 
     // Re-apply styles on document updates
     const updateHandler = () => {
-      setTimeout(() => this.applyStyles(), 50);
+      setTimeout(() => applyCitationStyles(this.container), 50);
     };
     this.editor.on('update', updateHandler);
-    this.cleanupFns.push(() => this.editor.off('update', updateHandler));
+    this.unsubscribe = () => this.editor.off('update', updateHandler);
   }
 
   /** Refresh numbering and styles */
-  refresh() {
-    this.convertToNumbered();
-    setTimeout(() => this.applyStyles(), 100);
+  refresh(): Map<string, number> {
+    this.numberMap = applyNumberedLabels(this.editor);
+    setTimeout(() => applyCitationStyles(this.container), 100);
+    return this.numberMap;
   }
 
-  /** Set callback for citation clicks */
-  onCitationClick(callback: (citation: CitationData | null) => void) {
-    this.clickCallback = callback;
-    return this;
-  }
-
-  /** Set callback for selection changes */
-  onSelectionChange(callback: (citation: CitationData | null, pos: number) => void) {
-    this.selectionCallback = callback;
-    return this;
-  }
-
-  /** Get citation at a document position */
-  getCitationAt(pos: number): CitationData | null {
-    const node = this.editor.state.doc.nodeAt(pos);
-    if (node?.type.name !== 'citation') return null;
-    return {
-      sourceIds: node.attrs.sourceIds || [],
-      resolvedText: node.attrs.resolvedText || '',
-      instruction: node.attrs.instruction || '',
-      position: pos,
-    };
-  }
-
-  /** Get the current number map (sourceId -> number) */
+  /** Get the current number map */
   getNumberMap(): Map<string, number> {
     return this.numberMap;
   }
 
   /** Get citation label for source IDs */
   getLabel(sourceIds: string[]): string {
-    const nums = sourceIds.map(sid => this.numberMap.get(sid)).filter(Boolean);
-    return nums.length ? nums.join(',') + '.' : '?.';
+    return getCitationLabel(sourceIds, this.numberMap);
   }
 
-  /** Insert a new citation at position */
-  insertCitation(pos: number, sourceTag: string): boolean {
-    const citationType = this.editor.state.schema.nodes.citation;
-    if (!citationType) return false;
-
-    const node = citationType.create({
-      sourceIds: [sourceTag],
-      resolvedText: '?.',
-      instruction: `CITATION ${sourceTag}`,
-    });
-
-    this.editor.dispatch(this.editor.state.tr.insert(pos, node));
-    this.refresh();
-    return true;
-  }
-
-  /** Clean up all listeners */
+  /** Clean up listeners */
   destroy() {
-    this.cleanupFns.forEach(fn => fn());
-    this.cleanupFns = [];
-  }
-
-  private convertToNumbered() {
-    const citations: { pos: number; node: any }[] = [];
-    this.editor.state.doc.descendants((node: any, pos: number) => {
-      if (node.type.name === 'citation') citations.push({ pos, node });
-    });
-
-    // Build number map
-    this.numberMap = new Map();
-    let num = 1;
-    this.editor.state.doc.descendants((node: any) => {
-      if (node.type.name === 'citation') {
-        for (const sid of node.attrs.sourceIds || []) {
-          if (!this.numberMap.has(sid)) this.numberMap.set(sid, num++);
-        }
-      }
-    });
-
-    if (!citations.length) return;
-
-    // Update citation labels
-    let tr = this.editor.state.tr;
-    for (let i = citations.length - 1; i >= 0; i--) {
-      const { pos, node } = citations[i];
-      const label = this.getLabel(node.attrs.sourceIds || []);
-      tr = tr.setNodeMarkup(pos, undefined, { ...node.attrs, resolvedText: label });
-    }
-    this.editor.dispatch(tr);
-  }
-
-  private applyStyles() {
-    if (!this.container) return;
-
-    // Get citation positions
-    const citationPositions = new Set<number>();
-    this.editor.state.doc.descendants((node: any, pos: number) => {
-      if (node.type.name === 'citation') citationPositions.add(pos);
-    });
-
-    // Apply class to citation spans
-    citationPositions.forEach(pos => {
-      const span = this.container.querySelector(`[data-pm-start="${pos}"]`);
-      if (span && !span.classList.contains('citation-pill')) {
-        span.classList.add('citation-pill');
-      }
-    });
+    this.unsubscribe?.();
+    this.unsubscribe = null;
   }
 }
 
-// Export a simple setup function as alternative
-export function setupCitationPolyfill(
-  superdoc: any,
-  container: HTMLElement,
-  options?: {
-    onCitationClick?: (citation: CitationData | null) => void;
-    onSelectionChange?: (citation: CitationData | null, pos: number) => void;
-  }
-): CitationPolyfill {
-  const polyfill = new CitationPolyfill(superdoc, container);
-  if (options?.onCitationClick) polyfill.onCitationClick(options.onCitationClick);
-  if (options?.onSelectionChange) polyfill.onSelectionChange(options.onSelectionChange);
-  return polyfill;
+// Legacy exports for backwards compatibility
+export { CitationStyler as CitationPolyfill };
+
+export interface CitationData {
+  sourceIds: string[];
+  resolvedText: string;
+  instruction: string;
+  position: number;
 }
