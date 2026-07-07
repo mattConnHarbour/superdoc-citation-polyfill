@@ -1,14 +1,17 @@
 /**
- * Citation Polyfill (Minimal) - styling and numbering only.
+ * Citation Polyfill - styling, numbering, and click handling.
  *
- * For click handling and positioning, use SuperDoc's native Custom UI APIs:
- * - Click detection: editor click events + doc.citations.list()
- * - Positioning: ui.viewport.getRect()
- *
- * This polyfill only provides:
- * - Pill-style CSS for citation markers
- * - Numbered label generation (sourceId -> [1], [2], etc.)
+ * Uses SuperDoc's native Custom UI APIs for click detection and selection.
+ * ProseMirror is only used for numbering (traversing/updating citation nodes).
  */
+
+import { createSuperDocUI } from 'superdoc/ui';
+
+export interface CitationData {
+  sourceIds: string[];
+  resolvedText: string;
+  instruction: string;
+}
 
 const CITATION_CSS = `
 .citation-pill {
@@ -32,7 +35,6 @@ let cssInjected = false;
 
 /**
  * Inject citation pill CSS styles into the document head.
- * Safe to call multiple times - only injects once.
  */
 export function injectCitationStyles(): void {
   if (cssInjected) return;
@@ -45,12 +47,32 @@ export function injectCitationStyles(): void {
 
 /**
  * Apply the citation-pill class to all citation elements in a container.
- * Call this after document updates to ensure new citations are styled.
+ * Since SuperDoc renders citations as plain text runs, we need to find them by position.
  */
-export function applyCitationStyles(container: HTMLElement): void {
+export function applyCitationStyles(container: HTMLElement, editor?: any): void {
   injectCitationStyles();
-  container.querySelectorAll('[data-id="citation"]').forEach(el => {
-    if (!el.classList.contains('citation-pill')) {
+
+  if (!editor) return;
+
+  // Get citation positions from ProseMirror
+  const citationPositions: { start: number; end: number }[] = [];
+  editor.state.doc.descendants((node: any, pos: number) => {
+    if (node.type.name === 'citation') {
+      citationPositions.push({ start: pos, end: pos + node.nodeSize });
+    }
+  });
+
+  // Find text runs that match citation positions and style them
+  container.querySelectorAll('.superdoc-text-run[data-pm-start]').forEach(el => {
+    const pmStart = parseInt(el.getAttribute('data-pm-start') || '', 10);
+    const pmEnd = parseInt(el.getAttribute('data-pm-end') || '', 10);
+
+    // Check if this text run overlaps with any citation
+    const isCitation = citationPositions.some(
+      cit => pmStart >= cit.start && pmEnd <= cit.end
+    );
+
+    if (isCitation && !el.classList.contains('citation-pill')) {
       el.classList.add('citation-pill');
     }
   });
@@ -58,7 +80,6 @@ export function applyCitationStyles(container: HTMLElement): void {
 
 /**
  * Build a map of sourceId -> citation number based on document order.
- * First occurrence of each sourceId gets the next number.
  */
 export function buildNumberMap(editor: any): Map<string, number> {
   const numberMap = new Map<string, number>();
@@ -79,7 +100,6 @@ export function buildNumberMap(editor: any): Map<string, number> {
 
 /**
  * Get a formatted citation label for given sourceIds.
- * Example: ['src1', 'src2'] with numberMap {src1: 1, src2: 3} -> "1,3."
  */
 export function getCitationLabel(sourceIds: string[], numberMap: Map<string, number>): string {
   const nums = sourceIds
@@ -90,7 +110,6 @@ export function getCitationLabel(sourceIds: string[], numberMap: Map<string, num
 
 /**
  * Update all citations in the document to use numbered labels.
- * Mutates the document by setting resolvedText on each citation node.
  */
 export function applyNumberedLabels(editor: any): Map<string, number> {
   const numberMap = buildNumberMap(editor);
@@ -104,7 +123,6 @@ export function applyNumberedLabels(editor: any): Map<string, number> {
 
   if (citations.length === 0) return numberMap;
 
-  // Update labels in reverse order to preserve positions
   let tr = editor.state.tr;
   for (let i = citations.length - 1; i >= 0; i--) {
     const { pos, node } = citations[i];
@@ -117,21 +135,27 @@ export function applyNumberedLabels(editor: any): Map<string, number> {
 }
 
 /**
- * Convenience class that combines all polyfill functionality.
- * Automatically applies styles and updates on document changes.
+ * Citation Styler - combines styling, numbering, and click handling.
  */
 export class CitationStyler {
+  private superdoc: any;
   private editor: any;
+  private doc: any;
   private container: HTMLElement;
+  private ui: ReturnType<typeof createSuperDocUI> | null = null;
   private numberMap: Map<string, number> = new Map();
-  private unsubscribe: (() => void) | null = null;
+  private cleanupFns: (() => void)[] = [];
+  private clickCallback: ((citation: CitationData | null) => void) | null = null;
+  private selectionCallback: ((citation: CitationData | null) => void) | null = null;
 
   constructor(superdoc: any, container: HTMLElement) {
+    this.superdoc = superdoc;
     this.editor = superdoc?.activeEditor;
+    this.doc = this.editor?.doc;
     this.container = container;
 
-    if (!this.editor || !this.container) {
-      console.warn('[CitationStyler] Missing editor or container');
+    if (!this.editor || !this.container || !this.doc) {
+      console.warn('[CitationStyler] Missing editor, container, or doc');
       return;
     }
 
@@ -142,18 +166,88 @@ export class CitationStyler {
     injectCitationStyles();
     this.refresh();
 
+    // Create SuperDoc UI controller
+    this.ui = createSuperDocUI({ superdoc: this.superdoc });
+
+    // Click handling using ui.viewport.positionAt()
+    const host = this.ui.viewport.getHost();
+    if (host) {
+      const clickHandler = (e: MouseEvent) => {
+        if (!this.ui) return;
+        const hit = this.ui.viewport.positionAt({ x: e.clientX, y: e.clientY });
+        const citation = hit?.point ? this.findCitationAtPoint(hit.point) : null;
+        if (this.clickCallback) {
+          this.clickCallback(citation);
+        }
+      };
+      host.addEventListener('click', clickHandler);
+      this.cleanupFns.push(() => host.removeEventListener('click', clickHandler));
+    }
+
+    // Selection change handling using ui.selection.subscribe()
+    const unsubscribe = this.ui.selection.subscribe(({ snapshot }) => {
+      if (!this.selectionCallback) return;
+      const firstSegment = snapshot.target?.segments?.[0];
+      if (firstSegment) {
+        const point = { blockId: firstSegment.blockId, offset: firstSegment.range.start };
+        const citation = this.findCitationAtPoint(point);
+        this.selectionCallback(citation);
+      }
+    });
+    this.cleanupFns.push(unsubscribe);
+
     // Re-apply styles on document updates
     const updateHandler = () => {
-      setTimeout(() => applyCitationStyles(this.container), 50);
+      setTimeout(() => applyCitationStyles(this.container, this.editor), 50);
     };
     this.editor.on('update', updateHandler);
-    this.unsubscribe = () => this.editor.off('update', updateHandler);
+    this.cleanupFns.push(() => this.editor.off('update', updateHandler));
+  }
+
+  /** Find citation at a given point using doc.citations.list() */
+  private findCitationAtPoint(point: { blockId: string; offset: number }): CitationData | null {
+    try {
+      const result = this.doc.citations.list();
+      for (const item of result.items) {
+        const anchor = item.address?.anchor;
+        if (!anchor) continue;
+
+        // Add tolerance since positionAt() may return position just before/after the citation
+        const tolerance = 2;
+        if (
+          anchor.start.blockId === point.blockId &&
+          point.offset >= anchor.start.offset - tolerance &&
+          point.offset <= anchor.end.offset + tolerance
+        ) {
+          return {
+            sourceIds: item.sourceIds || [],
+            resolvedText: item.displayText || '',
+            instruction: item.instruction || '',
+          };
+        }
+      }
+    } catch {
+      // citations.list() may fail
+    }
+    return null;
+  }
+
+  /** Set callback for citation clicks */
+  onCitationClick(callback: (citation: CitationData | null) => void): this {
+    this.clickCallback = callback;
+    return this;
+  }
+
+  /** Set callback for selection changes */
+  onSelectionChange(callback: (citation: CitationData | null) => void): this {
+    this.selectionCallback = callback;
+    return this;
   }
 
   /** Refresh numbering and styles */
   refresh(): Map<string, number> {
     this.numberMap = applyNumberedLabels(this.editor);
-    setTimeout(() => applyCitationStyles(this.container), 100);
+    setTimeout(() => applyCitationStyles(this.container, this.editor), 100);
     return this.numberMap;
   }
 
@@ -169,17 +263,12 @@ export class CitationStyler {
 
   /** Clean up listeners */
   destroy() {
-    this.unsubscribe?.();
-    this.unsubscribe = null;
+    this.cleanupFns.forEach(fn => fn());
+    this.cleanupFns = [];
+    this.ui?.destroy();
+    this.ui = null;
   }
 }
 
-// Legacy exports for backwards compatibility
+// Legacy export
 export { CitationStyler as CitationPolyfill };
-
-export interface CitationData {
-  sourceIds: string[];
-  resolvedText: string;
-  instruction: string;
-  position: number;
-}

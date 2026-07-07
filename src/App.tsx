@@ -26,7 +26,6 @@ function App() {
   const [inlineCitations, setInlineCitations] = useState<InlineCitation[]>([]);
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
   const [selectedCitation, setSelectedCitation] = useState<CitationData | null>(null);
-  const [cursorPos, setCursorPos] = useState(0);
   const [numberMap, setNumberMap] = useState<Map<string, number>>(new Map());
   const [bibliographyStyle, setBibliographyStyle] = useState('APA');
   const [showAddSource, setShowAddSource] = useState(false);
@@ -88,60 +87,26 @@ function App() {
     }
   }, []);
 
-  // Native click handler using SuperDoc APIs
-  const getCitationAtPos = useCallback((pos: number): CitationData | null => {
-    const editor = editorRef.current?.getInstance()?.activeEditor;
-    if (!editor) return null;
-
-    const node = editor.state.doc.nodeAt(pos);
-    if (node?.type.name !== 'citation') return null;
-
-    return {
-      sourceIds: node.attrs.sourceIds || [],
-      resolvedText: node.attrs.resolvedText || '',
-      instruction: node.attrs.instruction || '',
-      position: pos,
-    };
-  }, []);
-
   const handleEditorReady = useCallback(({ superdoc }: { superdoc: any }) => {
     setIsReady(true);
 
     const container = document.getElementById('superdoc-editor') as HTMLElement;
-    const editor = superdoc?.activeEditor;
-    if (!superdoc || !container || !editor) return;
+    if (!superdoc || !container) return;
 
-    // Clean up previous styler
+    // Clean up previous instance
     stylerRef.current?.destroy();
 
-    // Set up new styler (styling + numbering only)
+    // Set up new styler with click/selection callbacks
     stylerRef.current = new CitationStyler(superdoc, container);
+    stylerRef.current
+      .onCitationClick(setSelectedCitation)
+      .onSelectionChange(setSelectedCitation);
     setNumberMap(stylerRef.current.getNumberMap());
-
-    // Native click handling
-    const clickHandler = (e: MouseEvent) => {
-      const pos = editor.posAtCoords({ left: e.clientX, top: e.clientY })?.pos;
-      if (pos !== undefined) {
-        const citation = getCitationAtPos(pos);
-        setSelectedCitation(citation);
-      }
-    };
-    container.addEventListener('click', clickHandler);
-
-    // Native selection change handling
-    const selectionHandler = () => {
-      const pos = editor.state.selection.from;
-      setCursorPos(pos);
-      setSelectedCitation(getCitationAtPos(pos));
-    };
-    editor.on('selectionUpdate', selectionHandler);
 
     // Load sources and citations from document API
     refreshSources();
     refreshCitations();
-
-    // Cleanup on unmount handled by useEffect
-  }, [refreshSources, refreshCitations, getCitationAtPos]);
+  }, [refreshSources, refreshCitations]);
 
   const getSelectedSources = () => {
     if (!selectedCitation?.sourceIds?.length) return [];
@@ -176,20 +141,27 @@ function App() {
     setNewSource({ type: 'journalArticle', title: '', author: '', year: '' });
   };
 
-  // Native citation insertion using SDK
+  // Insert citation using SDK with native TextTarget from doc.selection
   const insertCitation = () => {
     const superdoc = editorRef.current?.getInstance();
-    const doc = superdoc?.activeEditor?.doc;
-    if (!doc || !selectedSourceId) return;
+    const editor = superdoc?.activeEditor;
+    const doc = editor?.doc;
+    if (!doc || !editor || !selectedSourceId) return;
 
     const source = sources.find(s => s.sourceId === selectedSourceId);
     if (!source) return;
 
-    superdoc.activeEditor?.focus();
+    editor.focus();
 
-    // Use native SDK to insert citation
+    // Get TextTarget from doc.selection.current()
+    const { target } = doc.selection.current();
+    if (!target) {
+      console.warn('No selection target available');
+      return;
+    }
+
     doc.citations.insert({
-      at: { kind: 'cursor' },
+      at: target,
       sourceIds: [source.tag],
     });
 
