@@ -1,0 +1,20 @@
+diff --git a/node_modules/superdoc/dist/chunks/SuperConverter-SsIUcBUk.es.js b/node_modules/superdoc/dist/chunks/SuperConverter-SsIUcBUk.es.js
+index 98d47d9..8144761 100644
+--- a/node_modules/superdoc/dist/chunks/SuperConverter-SsIUcBUk.es.js
++++ b/node_modules/superdoc/dist/chunks/SuperConverter-SsIUcBUk.es.js
+@@ -68255,6 +68255,7 @@ const tableOfContentsHandlerEntity = generateV2HandlerEntity("tableOfContentsHan
+ const indexHandlerEntity = generateV2HandlerEntity("indexHandler", translator$25);
+ const indexEntryHandlerEntity = generateV2HandlerEntity("indexEntryHandler", translator$26);
+ const bibliographyHandlerEntity = generateV2HandlerEntity("bibliographyHandler", translator$20);
++const citationHandlerEntity = generateV2HandlerEntity("citationNodeHandler", translator$19);
+ const tableOfAuthoritiesHandlerEntity = generateV2HandlerEntity("tableOfAuthoritiesHandler", translator$22);
+ const commentRangeStartHandlerEntity = generateV2HandlerEntity("commentRangeStartHandler", commentRangeStartTranslator);
+ const commentRangeEndHandlerEntity = generateV2HandlerEntity("commentRangeEndHandler", commentRangeEndTranslator);
+@@ -68825,6 +68826,7 @@ const defaultNodeListHandler = () => {
+ 		permStartHandlerEntity,
+ 		permEndHandlerEntity,
+ 		mathNodeHandlerEntity,
++		citationHandlerEntity,
+ 		passthroughNodeHandlerEntity
+ 	];
+ 	return {
